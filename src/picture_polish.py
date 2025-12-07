@@ -42,7 +42,8 @@ class ImagePolisher:
                  color: float = 1.1,
                  brightness: float = 1.05,
                  denoise: bool = True,
-                 auto_levels: bool = True):
+                 auto_levels: bool = True,
+                 autocut: bool = False):
         """
         Initialize the polisher with enhancement parameters.
 
@@ -53,6 +54,7 @@ class ImagePolisher:
             brightness: Brightness factor (1.0 = no change, >1 = brighter)
             denoise: Apply noise reduction
             auto_levels: Apply automatic level adjustment
+            autocut: Automatically detect and crop to document boundaries
         """
         self.sharpen = sharpen
         self.contrast = contrast
@@ -60,6 +62,7 @@ class ImagePolisher:
         self.brightness = brightness
         self.denoise = denoise
         self.auto_levels = auto_levels
+        self.autocut = autocut
 
     def load_image(self, path: Path) -> Image.Image:
         """Load an image from file."""
@@ -135,6 +138,118 @@ class ImagePolisher:
             # Fallback: mild blur for basic noise reduction
             return img.filter(ImageFilter.MedianFilter(size=3))
 
+    def apply_autocut(self, img: Image.Image) -> Image.Image:
+        """
+        Automatically detect and crop to document/card boundaries.
+        Uses edge detection and contour finding to locate the document.
+        """
+        if not self.autocut:
+            return img
+
+        if not OPENCV_SUPPORT:
+            print("Warning: Autocut requires OpenCV. Skipping.", file=sys.stderr)
+            return img
+
+        img_array = np.array(img)
+        original_height, original_width = img_array.shape[:2]
+
+        # Convert to grayscale
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Edge detection
+        edges = cv2.Canny(blurred, 50, 150)
+
+        # Dilate edges to close gaps
+        kernel = np.ones((5, 5), np.uint8)
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+
+        # Find contours
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        if not contours:
+            return img
+
+        # Find the largest rectangular contour
+        best_contour = None
+        max_area = 0
+        min_area_threshold = (original_width * original_height) * 0.1  # At least 10% of image
+
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if area < min_area_threshold:
+                continue
+
+            # Approximate the contour to a polygon
+            peri = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
+
+            # Look for quadrilaterals (4 corners = document/card)
+            if len(approx) == 4 and area > max_area:
+                max_area = area
+                best_contour = approx
+
+        if best_contour is None:
+            # Fallback: use bounding rectangle of largest contour
+            largest_contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(largest_contour)
+
+            # Add small padding
+            padding = 10
+            x = max(0, x - padding)
+            y = max(0, y - padding)
+            w = min(original_width - x, w + 2 * padding)
+            h = min(original_height - y, h + 2 * padding)
+
+            return img.crop((x, y, x + w, y + h))
+
+        # Get the corner points and apply perspective transform
+        pts = best_contour.reshape(4, 2)
+
+        # Order points: top-left, top-right, bottom-right, bottom-left
+        rect = self._order_points(pts)
+
+        # Calculate the width and height of the new image
+        width_a = np.linalg.norm(rect[2] - rect[3])
+        width_b = np.linalg.norm(rect[1] - rect[0])
+        max_width = int(max(width_a, width_b))
+
+        height_a = np.linalg.norm(rect[1] - rect[2])
+        height_b = np.linalg.norm(rect[0] - rect[3])
+        max_height = int(max(height_a, height_b))
+
+        # Destination points for perspective transform
+        dst = np.array([
+            [0, 0],
+            [max_width - 1, 0],
+            [max_width - 1, max_height - 1],
+            [0, max_height - 1]
+        ], dtype=np.float32)
+
+        # Compute perspective transform and apply
+        matrix = cv2.getPerspectiveTransform(rect.astype(np.float32), dst)
+        warped = cv2.warpPerspective(img_array, matrix, (max_width, max_height))
+
+        return Image.fromarray(warped)
+
+    def _order_points(self, pts: np.ndarray) -> np.ndarray:
+        """Order points as: top-left, top-right, bottom-right, bottom-left."""
+        rect = np.zeros((4, 2), dtype=np.float32)
+
+        # Top-left has smallest sum, bottom-right has largest sum
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+
+        # Top-right has smallest difference, bottom-left has largest difference
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+
+        return rect
+
     def analyze_image(self, img: Image.Image) -> dict:
         """Analyze image to suggest optimal enhancements."""
         img_array = np.array(img)
@@ -183,6 +298,9 @@ class ImagePolisher:
 
         # Apply enhancements in optimal order
         result = img.copy()
+
+        # 0. Autocut first (crop to document boundaries)
+        result = self.apply_autocut(result)
 
         # 1. Denoise first (reduces artifacts before other operations)
         result = self.apply_denoise(result)
@@ -278,9 +396,11 @@ Examples:
     parser.add_argument('--no-denoise', action='store_true', help='Disable noise reduction')
     parser.add_argument('--no-auto-levels', action='store_true', help='Disable auto level adjustment')
     parser.add_argument('--no-auto-adjust', action='store_true', help='Disable automatic parameter adjustment')
+    parser.add_argument('--autocut', action='store_true',
+                        help='Auto-detect and crop to document/card boundaries (for documents, IDs, passports)')
 
     # Presets
-    parser.add_argument('--preset', choices=['subtle', 'balanced', 'vivid', 'sharp'],
+    parser.add_argument('--preset', choices=['subtle', 'balanced', 'vivid', 'sharp', 'document', 'passport', 'id'],
                         help='Use a preset configuration')
 
     args = parser.parse_args()
@@ -288,10 +408,15 @@ Examples:
     # Apply presets
     if args.preset:
         presets = {
+            # Photo presets
             'subtle': {'sharpen': 1.1, 'contrast': 1.05, 'color': 1.05, 'brightness': 1.02},
             'balanced': {'sharpen': 1.3, 'contrast': 1.1, 'color': 1.1, 'brightness': 1.05},
             'vivid': {'sharpen': 1.4, 'contrast': 1.2, 'color': 1.3, 'brightness': 1.1},
             'sharp': {'sharpen': 1.6, 'contrast': 1.15, 'color': 1.1, 'brightness': 1.05},
+            # Document presets - optimized for text clarity
+            'document': {'sharpen': 1.8, 'contrast': 1.4, 'color': 0.9, 'brightness': 1.15},
+            'passport': {'sharpen': 1.4, 'contrast': 1.2, 'color': 1.0, 'brightness': 1.05},
+            'id': {'sharpen': 1.5, 'contrast': 1.3, 'color': 0.95, 'brightness': 1.1},
         }
         preset = presets[args.preset]
         args.sharpen = preset['sharpen']
@@ -316,7 +441,8 @@ Examples:
         color=args.color,
         brightness=args.brightness,
         denoise=not args.no_denoise,
-        auto_levels=not args.no_auto_levels
+        auto_levels=not args.no_auto_levels,
+        autocut=args.autocut
     )
 
     # Process

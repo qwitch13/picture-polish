@@ -70,3 +70,27 @@ python src/picture_polish.py image.png --preset vivid
   - Processing pipeline explanation
 - Fixed .gitignore to exclude Python __pycache__ files
 - Pushed to GitHub: https://github.com/qwitch13/picture-polish
+
+---
+
+### Update 2 - Document Presets & Auto-Cut
+
+**New Presets Added:**
+- `document` - Optimized for scanned documents, receipts, text (high sharpening 1.8, high contrast 1.4, reduced color 0.9)
+- `passport` - For passport photos (balanced settings, natural skin tones)
+- `id` - For ID cards and licenses (sharp text, good contrast)
+
+**New Feature: Auto-Cut (`--autocut`)**
+- Automatic document boundary detection using edge detection and contour finding
+- Perspective correction for skewed/tilted documents
+- Crops precisely to document edges
+- Works with documents, IDs, passports, business cards
+
+**Usage:**
+```bash
+# Document with auto-crop
+python src/picture_polish.py document_photo.jpg --preset document --autocut
+
+# ID card processing
+python src/picture_polish.py id_scan.jpg --preset id --autocut
+```
