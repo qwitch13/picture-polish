@@ -57,3 +57,16 @@ python src/picture_polish.py photo.HEIC -o enhanced.jpg
 # With vivid preset
 python src/picture_polish.py image.png --preset vivid
 ```
+
+---
+
+### Update 1 - Documentation & Cleanup
+
+- Added comprehensive README.md with:
+  - Installation instructions
+  - Usage examples
+  - Full options reference table
+  - Preset comparison table
+  - Processing pipeline explanation
+- Fixed .gitignore to exclude Python __pycache__ files
+- Pushed to GitHub: https://github.com/qwitch13/picture-polish
